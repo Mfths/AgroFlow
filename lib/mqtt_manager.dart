@@ -11,6 +11,10 @@ class MqttManager {
 
   late MqttServerClient client;
 
+  // Simpan topik yang pernah di-subscribe, supaya bisa di-resubscribe manual
+  // kalau resubscribeOnAutoReconnect ternyata tidak menutupi semua kasus.
+  final List<String> _subscribedTopics = [];
+
   void initializeMQTT({
     required Function(String topic, String message) onMessageReceived,
     required Function() onConnected,
@@ -24,9 +28,19 @@ class MqttManager {
     client.keepAlivePeriod = 20;
     client.logging(on: true);
 
+    // --- FIX UTAMA: auto-reconnect ---
+    // Tanpa ini, kalau koneksi putus sebentar (ganti wifi, app di-background,
+    // sinyal HP lemah, dll), client akan diam di status disconnected
+    // selamanya. Akibatnya semua publishMessage() setelah itu gagal total
+    // secara silent, termasuk command "matikan pompa".
+    client.autoReconnect = true;
+    client.resubscribeOnAutoReconnect = true;
+
     client.onConnected = onConnected;
     client.onDisconnected = () => print('❌ Terputus dari HiveMQ Broker.');
     client.onSubscribed = (String topic) => print('✅ Konfirmasi subscribe: $topic');
+    client.onAutoReconnect = () => print('🔄 Mencoba auto-reconnect...');
+    client.onAutoReconnected = () => print('✅ Auto-reconnect berhasil, koneksi pulih kembali.');
 
     final MqttConnectMessage connMessage = MqttConnectMessage()
         .withClientIdentifier(clientId)
@@ -61,20 +75,63 @@ class MqttManager {
   }
 
   void subscribeToTopic(String topic) {
+    if (!_subscribedTopics.contains(topic)) {
+      _subscribedTopics.add(topic);
+    }
+
     if (client.connectionStatus!.state == MqttConnectionState.connected) {
       print('📥 Subscribe ke topik: $topic');
-      client.subscribe(topic, MqttQos.atMostOnce);
+      // Dinaikkan ke atLeastOnce supaya command dari broker (mis. status
+      // pompa) tidak mudah hilang saat diterima sisi app.
+      client.subscribe(topic, MqttQos.atLeastOnce);
     } else {
       print('⚠️ Gagal subscribe, client belum connected. Status: ${client.connectionStatus!.state}');
     }
   }
 
-  void publishMessage(String topic, String message) {
+  /// Mengirim pesan MQTT.
+  /// Return true kalau pesan berhasil dikirim ke broker, false kalau gagal
+  /// (misal karena sedang disconnected). PENTING: cek return value ini di
+  /// UI, jangan asumsikan command selalu berhasil hanya karena tombol
+  /// di-tap.
+  bool publishMessage(String topic, String message) {
     if (client.connectionStatus!.state == MqttConnectionState.connected) {
       final MqttClientPayloadBuilder builder = MqttClientPayloadBuilder();
       builder.addString(message);
       print('📤 Mengirim perintah ke $topic: $message');
-      client.publishMessage(topic, MqttQos.atMostOnce, builder.payload!);
+
+      // --- FIX: QoS dinaikkan dari atMostOnce -> atLeastOnce ---
+      // atMostOnce (QoS 0) = "kirim sekali, gak peduli nyampe atau gak".
+      // Untuk data sensor itu oke karena terus dikirim ulang tiap beberapa
+      // detik. Tapi untuk command kontrol (nyala/mati pompa) ini riskan:
+      // sekali paket hilang karena gangguan jaringan sepersekian detik,
+      // command itu hilang permanen tanpa retry.
+      client.publishMessage(
+        topic,
+        MqttQos.atLeastOnce,
+        builder.payload!,
+        retain: false, // pastikan TIDAK retain, supaya broker tidak
+                        // mengirim ulang command lama (mis. "1") setiap
+                        // kali ESP32 reconnect & subscribe ulang.
+      );
+      return true;
+    } else {
+      // --- FIX: dulu kalau disconnected, method ini diam total tanpa
+      // error apapun. Sekarang minimal ke-print & return false, supaya
+      // UI bisa kasih tahu user "command gagal, cek koneksi" daripada
+      // diam-diam gagal dan UI sudah keburu optimistic-update jadi OFF.
+      print('🚫 GAGAL KIRIM! Status koneksi: ${client.connectionStatus!.state}');
+      return false;
     }
+  }
+
+  /// Cek cepat status koneksi saat ini, supaya UI bisa menampilkan
+  /// indikator (misal titik merah/hijau) tanpa harus nebak-nebak.
+  bool isConnected() {
+    return client.connectionStatus?.state == MqttConnectionState.connected;
+  }
+
+  void disconnect() {
+    client.disconnect();
   }
 }

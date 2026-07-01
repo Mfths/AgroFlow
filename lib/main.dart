@@ -1,9 +1,19 @@
 import 'package:flutter/material.dart';
+import 'dashboard_page.dart';
+import 'main_hub.dart';
 import 'mqtt_manager.dart';
+import 'logo_widget.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart'; // 🚀 UNTUK FORMAT TANGGAL DAN JAM
 import 'firebase_options.dart';
+
+// Global state/notifiers for app settings
+final ValueNotifier<ThemeMode> themeNotifier = ValueNotifier(ThemeMode.light);
+final ValueNotifier<String> userNameNotifier = ValueNotifier("Mifta");
+final ValueNotifier<bool> notificationNotifier = ValueNotifier(true);
+final ValueNotifier<String> mqttBrokerNotifier = ValueNotifier("broker.hivemq.com");
+final ValueNotifier<int> mqttPortNotifier = ValueNotifier(1883);
 
 Future<void> initializeApp() async {
   try {
@@ -27,18 +37,37 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'AgroFlow',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        colorSchemeSeed: Colors.green,
-        fontFamily: 'Sans-Serif',
-      ),
-      initialRoute: '/',
-      routes: {
-        '/': (context) => const SplashScreen(),
-        '/dashboard': (context) => const DashboardScreen(),
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: themeNotifier,
+      builder: (_, currentThemeMode, __) {
+        return MaterialApp(
+          title: 'AgroFlow',
+          debugShowCheckedModeBanner: false,
+          themeMode: currentThemeMode,
+          theme: ThemeData(
+            useMaterial3: true,
+            colorSchemeSeed: const Color(0xFF00FF87),
+            brightness: Brightness.light,
+            scaffoldBackgroundColor: const Color(0xFFF1F5F9),
+            cardColor: Colors.white,
+            fontFamily: 'Sans-Serif',
+          ),
+          darkTheme: ThemeData(
+            useMaterial3: true,
+            colorSchemeSeed: const Color(0xFF00FF87),
+            brightness: Brightness.dark,
+            scaffoldBackgroundColor: const Color(0xFF090A0F),
+            cardColor: const Color(0xFF131520),
+            fontFamily: 'Sans-Serif',
+          ),
+          initialRoute: '/',
+          routes: {
+            '/': (context) => const SplashScreen(),
+            '/dashboard': (context) => const DashboardScreen(),
+            '/dashboard_irigasi': (context) => const DashboardIrigasi(),
+            '/main_hub': (context) => const MainHub(),
+          },
+        );
       },
     );
   }
@@ -57,7 +86,7 @@ class _SplashScreenState extends State<SplashScreen> {
     super.initState();
     Future.delayed(const Duration(seconds: 2), () {
       if (mounted) {
-        Navigator.of(context).pushReplacementNamed('/dashboard');
+        Navigator.of(context).pushReplacementNamed('/main_hub');
       }
     });
   }
@@ -65,36 +94,53 @@ class _SplashScreenState extends State<SplashScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.green[700],
-      body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.eco, size: 80, color: Colors.white),
-            const SizedBox(height: 24),
-            const Text(
-              'AgroFlow',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 32,
-                fontWeight: FontWeight.bold,
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            colors: [
+              Color(0xFF090A0F), // Deep Space Navy
+              Color(0xFF131520), // Dark Navy Card
+            ],
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+          ),
+        ),
+        child: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const AgroFlowLogo(size: 100, showShadow: true),
+              const SizedBox(height: 24),
+              const Text(
+                'AgroFlow',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 32,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 2.0,
+                ),
               ),
-            ),
-            const SizedBox(height: 12),
-            const Text(
-              'Smart Irrigation System',
-              style: TextStyle(color: Colors.white70, fontSize: 14),
-            ),
-            const SizedBox(height: 40),
-            SizedBox(
-              width: 40,
-              height: 40,
-              child: CircularProgressIndicator(
-                valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                strokeWidth: 3,
+              const SizedBox(height: 12),
+              const Text(
+                'Smart Irrigation System',
+                style: TextStyle(
+                  color: Color(0xFF00FF87), // Neon Green
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 1.0,
+                ),
               ),
-            ),
-          ],
+              const SizedBox(height: 40),
+              const SizedBox(
+                width: 40,
+                height: 40,
+                child: CircularProgressIndicator(
+                  valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF00FF87)),
+                  strokeWidth: 3,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -115,6 +161,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   String statusKoneksi = "Menghubungkan...";
   String statusPompa = "MATI";
   bool isSensorError = false;
+  bool _isRefreshing = false;
 
   final MqttManager mqttHandler = MqttManager();
 
@@ -138,14 +185,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
         });
   }
 
-  @override
-  void initState() {
-    super.initState();
+  void _connectMQTT() {
+    setState(() {
+      statusKoneksi = "Menghubungkan...";
+    });
     mqttHandler.initializeMQTT(
       onConnected: () {
-        setState(() {
-          statusKoneksi = "Terhubung";
-        });
+        if (mounted) {
+          setState(() {
+            statusKoneksi = "Terhubung";
+          });
+        }
         mqttHandler.subscribeToTopic('irigasi/suhu');
         mqttHandler.subscribeToTopic('irigasi/kelembapan_udara');
         mqttHandler.subscribeToTopic('irigasi/kelembapan_tanah');
@@ -155,22 +205,58 @@ class _DashboardScreenState extends State<DashboardScreen> {
       },
       onMessageReceived: (topic, message) {
         simpanKeFirestore(topic, message);
-        setState(() {
-          if (topic == 'irigasi/suhu') {
-            suhu = message;
-          } else if (topic == 'irigasi/kelembapan_udara') {
-            kelembapanUdara = message;
-          } else if (topic == 'irigasi/kelembapan_tanah') {
-            kelembapanTanah = message;
-          } else if (topic == 'irigasi/status_pompa' ||
-              topic == 'irigasi/pompa_kontrol') {
-            statusPompa = (message == "1") ? "NYALA" : "MATI";
-          } else if (topic == 'irigasi/peringatan' && message == "BAHAYA") {
-            _showEmergencyDialog();
-          }
-        });
+        if (mounted) {
+          setState(() {
+            if (topic == 'irigasi/suhu') {
+              suhu = message;
+            } else if (topic == 'irigasi/kelembapan_udara') {
+              kelembapanUdara = message;
+            } else if (topic == 'irigasi/kelembapan_tanah') {
+              kelembapanTanah = message;
+            } else if (topic == 'irigasi/status_pompa' ||
+                topic == 'irigasi/pompa_kontrol') {
+              statusPompa = (message == "1") ? "NYALA" : "MATI";
+            } else if (topic == 'irigasi/peringatan' && message == "BAHAYA") {
+              _showEmergencyDialog();
+            }
+          });
+        }
       },
     );
+  }
+
+  Future<void> _onPullToRefresh() async {
+    if (_isRefreshing) return;
+    setState(() {
+      _isRefreshing = true;
+      suhu = "--";
+      kelembapanUdara = "--";
+      kelembapanTanah = "--";
+      statusKoneksi = "Menghubungkan...";
+    });
+
+    // Coba putuskan koneksi lama (jika ada) lalu sambungkan kembali
+    try {
+      mqttHandler.client.disconnect();
+    } catch (_) {}
+
+    // Delay singkat agar UI feedback terlihat, lalu reconnect
+    await Future.delayed(const Duration(milliseconds: 800));
+    _connectMQTT();
+
+    // Beri waktu koneksi agar ada feedback, lalu selesaikan refresh
+    await Future.delayed(const Duration(seconds: 2));
+    if (mounted) {
+      setState(() {
+        _isRefreshing = false;
+      });
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _connectMQTT();
   }
 
   void _showEmergencyDialog() {
@@ -264,27 +350,34 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'AgroFlow Monitor',
-                          style: TextStyle(
-                            color: Colors.green[100],
-                            fontSize: 14,
-                            fontWeight: FontWeight.w500,
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'AgroFlow Monitor',
+                            style: TextStyle(
+                              color: Colors.green[100],
+                              fontSize: 14,
+                              fontWeight: FontWeight.w500,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
-                        ),
-                        const Text(
-                          'Dashboard Utama',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 26,
-                            fontWeight: FontWeight.bold,
+                          const Text(
+                            'Dashboard Utama',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 26,
+                              fontWeight: FontWeight.bold,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
+                    const SizedBox(width: 16),
                     CircleAvatar(
                       backgroundColor: Colors.white.withOpacity(0.2),
                       child: const Icon(Icons.eco, color: Colors.white),
@@ -316,10 +409,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
 
           Expanded(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(24.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+            child: RefreshIndicator(
+              onRefresh: _onPullToRefresh,
+              color: const Color(0xFF00FF87),
+              backgroundColor: const Color(0xFF131520),
+              strokeWidth: 3,
+              child: SingleChildScrollView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                padding: const EdgeInsets.all(24.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   if (isSensorError) ...[
                     Container(
@@ -356,14 +455,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Text(
-                        'Metrik Lingkungan',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                          color: Color(0xFF2C3E50),
+                      const Expanded(
+                        child: Text(
+                          'Metrik Lingkungan',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                            color: Color(0xFF2C3E50),
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                         ),
                       ),
+                      const SizedBox(width: 8),
                       TextButton.icon(
                         onPressed: () {
                           // 🚀 Berpindah ke Halaman Riwayat
@@ -485,6 +589,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ),
             ),
           ),
+        ),
         ],
       ),
     );
@@ -574,12 +679,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   crossAxisAlignment: CrossAxisAlignment.baseline,
                   textBaseline: TextBaseline.alphabetic,
                   children: [
-                    Text(
-                      value,
-                      style: const TextStyle(
-                        fontSize: 26,
-                        fontWeight: FontWeight.bold,
-                        color: Color(0xFF2C3E50),
+                    Flexible(
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          value,
+                          style: const TextStyle(
+                            fontSize: 26,
+                            fontWeight: FontWeight.bold,
+                            color: Color(0xFF2C3E50),
+                          ),
+                        ),
                       ),
                     ),
                     const SizedBox(width: 2),
@@ -613,23 +724,58 @@ class _DashboardScreenState extends State<DashboardScreen> {
 }
 
 // 🚀 HALAMAN BARU: HALAMAN LIST RIWAYAT DATA LOG DARI CLOUD FIRESTORE
-class HistoryScreen extends StatelessWidget {
+class HistoryScreen extends StatefulWidget {
   const HistoryScreen({super.key});
 
   @override
+  State<HistoryScreen> createState() => _HistoryScreenState();
+}
+
+class _HistoryScreenState extends State<HistoryScreen> {
+  final GlobalKey<RefreshIndicatorState> _refreshIndicatorKey =
+      GlobalKey<RefreshIndicatorState>();
+
+  Future<void> _onRefresh() async {
+    // StreamBuilder Firestore sudah real-time, jadi cukup tunggu sebentar
+    // sebagai visual feedback bahwa data sudah di-refresh
+    await Future.delayed(const Duration(seconds: 1));
+    if (mounted) setState(() {});
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final bool isDark = Theme.of(context).brightness == Brightness.dark;
+    Color scaffoldBg = isDark ? const Color(0xFF090A0F) : const Color(0xFFF1F5F9);
+    Color cardBg = isDark ? const Color(0xFF131520) : Colors.white;
+    Color appBarBg = isDark ? const Color(0xFF131520) : Colors.teal;
+    Color textMain = isDark ? Colors.white : const Color(0xFF0F172A);
+    Color textSub = isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B);
+
     return Scaffold(
-      backgroundColor: const Color(0xFFF6F9F6),
+      backgroundColor: scaffoldBg,
       appBar: AppBar(
         title: const Text(
           'Riwayat Data Sensor',
           style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
         ),
-        backgroundColor: Colors.green[700],
+        backgroundColor: appBarBg,
         iconTheme: const IconThemeData(color: Colors.white),
         elevation: 0,
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(1.0),
+          child: Container(
+            color: isDark ? const Color(0xFF1E2235) : Colors.black12,
+            height: 1.0,
+          ),
+        ),
       ),
-      body: StreamBuilder<QuerySnapshot>(
+      body: RefreshIndicator(
+        key: _refreshIndicatorKey,
+        onRefresh: _onRefresh,
+        color: const Color(0xFF00FF87),
+        backgroundColor: isDark ? const Color(0xFF131520) : Colors.white,
+        strokeWidth: 3,
+        child: StreamBuilder<QuerySnapshot>(
         // 🚀 Mengambil data dari koleksi Firestore, diurutkan dari yang paling baru masuk
         stream: FirebaseFirestore.instance
             .collection('history_agroflow')
@@ -638,7 +784,7 @@ class HistoryScreen extends StatelessWidget {
             .snapshots(),
         builder: (context, snapshot) {
           if (snapshot.hasError) {
-            return Center(child: Text('Terjadi kesalahan: ${snapshot.error}'));
+            return Center(child: Text('Terjadi kesalahan: ${snapshot.error}', style: TextStyle(color: textMain)));
           }
 
           if (snapshot.connectionState == ConnectionState.waiting) {
@@ -646,19 +792,19 @@ class HistoryScreen extends StatelessWidget {
           }
 
           if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
-            return const Center(
+            return Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Icon(
+                  const Icon(
                     Icons.history_toggle_off_rounded,
                     size: 64,
                     color: Colors.grey,
                   ),
-                  SizedBox(height: 12),
+                  const SizedBox(height: 12),
                   Text(
                     'Belum ada riwayat data dari cloud.',
-                    style: TextStyle(color: Colors.grey),
+                    style: TextStyle(color: textSub),
                   ),
                 ],
               ),
@@ -697,32 +843,36 @@ class HistoryScreen extends StatelessWidget {
 
               if (sensorType == 'suhu') {
                 iconData = Icons.thermostat_rounded;
-                sensorColor = Colors.orange;
+                sensorColor = const Color(0xFFFF5E36); // Neon Orange
                 unit = '°C';
                 friendlyName = 'Suhu Udara';
               } else if (sensorType == 'kelembapan_udara') {
                 iconData = Icons.wb_cloudy_rounded;
-                sensorColor = Colors.blue;
+                sensorColor = const Color(0xFF00E5FF); // Neon Cyan
                 unit = '%';
                 friendlyName = 'Kelembapan Udara';
               } else if (sensorType == 'kelembapan_tanah') {
                 iconData = Icons.grass_rounded;
-                sensorColor = Colors.brown;
+                sensorColor = const Color(0xFF00FF87); // Neon Green
                 unit = '%';
                 friendlyName = 'Kelembapan Tanah';
               } else if (sensorType == 'status_pompa' ||
                   sensorType == 'pompa_kontrol') {
                 iconData = Icons.water_drop;
-                sensorColor = Colors.teal;
+                sensorColor = const Color(0xFFBF5AF2); // Neon Purple
                 friendlyName = 'Status Saklar Pompa';
                 value = (value == "1" || value == 1) ? "NYALA" : "MATI";
               }
 
               return Card(
+                color: cardBg,
                 margin: const EdgeInsets.only(bottom: 10),
                 elevation: 2,
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(14),
+                  side: BorderSide(
+                    color: isDark ? const Color(0xFF1E2235) : Colors.black54.withOpacity(0.01),
+                  ),
                 ),
                 child: ListTile(
                   contentPadding: const EdgeInsets.symmetric(
@@ -735,26 +885,35 @@ class HistoryScreen extends StatelessWidget {
                   ),
                   title: Text(
                     friendlyName,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontWeight: FontWeight.bold,
                       fontSize: 15,
+                      color: textMain,
                     ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
                   subtitle: Padding(
                     padding: const EdgeInsets.only(top: 4),
                     child: Text(
                       formatTime,
-                      style: TextStyle(color: Colors.grey[600], fontSize: 12),
+                      style: TextStyle(color: textSub, fontSize: 12),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  trailing: Text(
-                    '$value $unit',
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                      color: sensorColor == Colors.grey
-                          ? Colors.black87
-                          : sensorColor,
+                  trailing: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerRight,
+                    child: Text(
+                      '$value $unit',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: sensorColor == Colors.grey
+                            ? (isDark ? Colors.white70 : Colors.black87)
+                            : sensorColor,
+                      ),
                     ),
                   ),
                 ),
@@ -762,6 +921,7 @@ class HistoryScreen extends StatelessWidget {
             },
           );
         },
+      ),
       ),
     );
   }
